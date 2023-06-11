@@ -1,32 +1,57 @@
+use std::cell::{RefCell, RefMut};
 use std::cmp::{Eq, PartialEq};
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::rc::Rc;
 
 #[derive(Debug)]
-struct LRU<K, V> {
+struct LRU<K, V: Clone> {
     capacity: u32,
     length: u32,
-    head: Option<Box<Node<V>>>,
-    tail: Option<Box<Node<V>>>,
-    lookup: HashMap<K, Node<V>>,
-    reverse_lookup: HashMap<Node<V>, K>,
+    head: Option<Rc<RefCell<InternalNode<V>>>>,
+    tail: Option<Rc<RefCell<InternalNode<V>>>>,
+    lookup: HashMap<K, Rc<RefCell<InternalNode<V>>>>,
+    reverse_lookup: HashMap<Rc<RefCell<InternalNode<V>>>, K>,
 }
 
-#[derive(Debug, Eq, Hash, PartialEq)]
-struct Node<V> {
-    next: Option<Box<Node<V>>>,
-    prev: Option<Box<Node<V>>>,
+#[derive(Debug, Eq, PartialEq)]
+struct InternalNode<V> {
+    next: Option<Rc<RefCell<InternalNode<V>>>>,
+    prev: Option<Rc<RefCell<InternalNode<V>>>>,
     value: V,
 }
 
-impl<V> Node<V> {
-    pub fn set(&mut self, value: V) {
+impl<V: Clone> InternalNode<V> {
+    fn set(&mut self, value: V) {
         self.value = value;
+    }
+
+    fn get(&self) -> V {
+        return self.value.clone();
     }
 }
 
-fn create_node<V>(value: V) -> Node<V> {
-    return Node {
+struct Node<V> {
+    node: Rc<RefCell<InternalNode<V>>>,
+}
+
+impl<V: Clone> Node<V> {
+    pub fn new(node: Rc<RefCell<InternalNode<V>>>) -> Node<V> {
+        Node { node }
+    }
+
+    pub fn set(&mut self, value: V) {
+        self.node.borrow_mut().set(value);
+    }
+
+    pub fn get(&self) -> V {
+        let borrowed_node = self.node.borrow();
+        borrowed_node.get().clone()
+    }
+}
+
+fn create_node<V>(value: V) -> InternalNode<V> {
+    return InternalNode {
         next: None,
         prev: None,
         value,
@@ -38,10 +63,10 @@ trait LeastRecentlyUsed<K, V> {
 
     fn update(&mut self, key: K, value: V);
 
-    fn get(&mut self, key: &K) -> Option<&Node<V>>;
+    fn get(&mut self, key: &K) -> Option<Node<V>>;
 }
 
-impl<K, V> LeastRecentlyUsed<K, V> for LRU<K, V>
+impl<K, V: Clone> LeastRecentlyUsed<K, V> for LRU<K, V>
 where
     K: Eq + Hash,
 {
@@ -57,14 +82,15 @@ where
     }
 
     fn update(&mut self, key: K, value: V) {
-        match self.lookup.get_mut(&key) {
+        match self.lookup.get(&key).cloned() {
             Some(node) => {
-                node.set(value);
-                self.get(&key);
+                node.borrow_mut().set(value);
+                self.detach(&mut node.borrow_mut());
+                self.prepend(&mut node.borrow_mut());
             }
             None => {
-                let node = create_node(value);
-                self.prepend(&node);
+                let node = Rc::new(RefCell::new(create_node(value)));
+                self.prepend(&mut node.borrow_mut());
                 self.lookup.insert(key, node);
                 self.length += 1;
                 self.trim_cache();
@@ -72,32 +98,39 @@ where
         }
     }
 
-    fn get(&mut self, key: &K) -> Option<&Node<V>> {
-        match self.lookup.get(key) {
-            // immutability borrow
+    fn get(&mut self, key: &K) -> Option<Node<V>> {
+        match self.lookup.get(key).cloned() {
             Some(node) => {
-                self.detach(node); // mutability borrow 1
-                self.prepend(node); // mutability borrow 2
-                Some(node)
+                self.detach(&mut node.borrow_mut());
+                self.prepend(&mut node.borrow_mut());
+                Some(Node::new(node))
             }
             None => None,
         }
     }
 }
 
-impl<K, V> LRU<K, V>
+impl<K, V: Clone> LRU<K, V>
 where
     K: Eq + Hash,
 {
-    fn detach(&mut self, node: &Node<V>) {
-        // if let Some(next) = node.next.as_ref().map(|boxed_node| &**boxed_node) {}
+    fn detach(&mut self, node: &mut RefMut<InternalNode<V>>) {
+        let prev_node = node.prev.take();
+        let next_node = node.next.take();
+        if let Some(prev) = prev_node {
+            prev.borrow_mut().next = next_node.clone();
+        }
+        if let Some(next) = next_node.clone() {
+            next.borrow_mut().prev = next_node;
+        }
 
-        // remove prev links
-        // remove next links
+        node.next = None;
+        node.prev = None;
+
         // update head/tail if necessary
     }
 
-    fn prepend(&self, node: &Node<V>) {
+    fn prepend(&self, node: &mut RefMut<InternalNode<V>>) {
         // update head (and tail if necessary)
         // update links to prev head
     }
